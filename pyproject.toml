@@ -5,7 +5,9 @@ description = "AI pipeline for Clair contract analyzer"
 requires-python = ">=3.11"
 dependencies = [
   "langchain>=0.3.0",
+  "langchain-google-genai>=2.0.0",
   "google-genai>=1.0.0",
+  "python-dotenv>=1.0.0",
   "paddleocr>=2.9.0",
   "ultralytics>=8.3.0",
   "torch>=2.6.0",

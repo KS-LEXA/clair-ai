@@ -103,7 +103,7 @@ class OCRPipeline:
 
     def _extract_page(self, image: np.ndarray, *, page_index: int) -> OCRPageResult:
         engine = self._get_ocr_engine()
-        result = engine.ocr(image, cls=self.use_angle_cls)
+        result = engine.ocr(image)
         lines = self._parse_ocr_lines(result)
         text = "\n".join(lines).strip()
         return OCRPageResult(page_index=page_index, text=text, lines=lines)
@@ -115,7 +115,6 @@ class OCRPipeline:
             self._ocr_engine = paddleocr.PaddleOCR(
                 use_angle_cls=self.use_angle_cls,
                 lang=self.lang,
-                show_log=False,
             )
         return self._ocr_engine
 
