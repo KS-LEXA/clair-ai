@@ -115,6 +115,7 @@ class OCRPipeline:
             self._ocr_engine = paddleocr.PaddleOCR(
                 use_angle_cls=self.use_angle_cls,
                 lang=self.lang,
+                show_log=False,
             )
         return self._ocr_engine
 
