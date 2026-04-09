@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -113,33 +114,23 @@ class LawVectorStore:
         if collection.count() == 0:
             return []
 
-        where = None
-        if contract_type:
-            # ChromaDB where 필터: contract_types 문자열에 포함 여부
-            where = {"contract_types": {"$contains": contract_type}}
-
-        try:
-            query_vector = embed_query(query)
-            result = collection.query(
-                query_embeddings=[query_vector],
-                n_results=min(top_k, collection.count()),
-                include=["metadatas", "distances"],
-                where=where,
-            )
-        except Exception:
-            # where 필터 실패 시 필터 없이 재시도
-            query_vector = embed_query(query)
-            result = collection.query(
-                query_embeddings=[query_vector],
-                n_results=min(top_k, collection.count()),
-                include=["metadatas", "distances"],
-            )
+        # contract_type 필터는 Python 쪽에서 처리 (ChromaDB where 미사용)
+        fetch_k = collection.count()
+        query_vector = embed_query(query)
+        result = collection.query(
+            query_embeddings=[query_vector],
+            n_results=min(fetch_k, collection.count()),
+            include=["metadatas", "distances"],
+        )
 
         results: list[LawSearchResult] = []
         for meta, dist in zip(
             result.get("metadatas", [[]])[0],
             result.get("distances", [[]])[0],
         ):
+            # contract_type 필터 — 저장된 값이 comma-separated string
+            if contract_type and contract_type not in meta.get("contract_types", ""):
+                continue
             results.append(LawSearchResult(
                 law_name=meta["law_name"],
                 article_no=meta["article_no"],
@@ -147,6 +138,8 @@ class LawVectorStore:
                 content=meta["content"],
                 score=1.0 - dist,
             ))
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -178,6 +171,9 @@ def ensure_law_db_initialized() -> int:
     Gemini API 키 없으면 건너뜀 (임베딩 불가).
     """
     import os
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parents[2] / ".env")
+
     if not os.environ.get("GEMINI_API_KEY", ""):
         return 0
     try:
