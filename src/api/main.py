@@ -8,8 +8,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-
 from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parents[2] / ".env")
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
