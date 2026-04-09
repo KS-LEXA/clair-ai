@@ -63,6 +63,7 @@ class ContractAnalysisResult:
     risks: list[RiskResult]
     summary: str
     qa: list[QAResult]
+    compliance: list[Any] | None = None  # list[ComplianceResult] — 지연 임포트
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class ContractAnalysisResult:
             "risks": [asdict(risk) for risk in self.risks],
             "summary": self.summary,
             "qa": [asdict(item) for item in self.qa],
+            "compliance": [asdict(c) for c in self.compliance] if self.compliance else [],
         }
 
 
@@ -100,11 +102,14 @@ class ContractAnalysisChain:
         risks = self._detect_risks(clauses)
         summary = self._summarize(clauses, extraction)
 
-        # 조항 임베딩 인덱싱 (RAG Q&A를 위해)
+        # RAG Q&A: 조항 임베딩 인덱싱
         contract_id = ocr_result.document_id
         self._index_clauses(contract_id, clauses)
-
         qa = self._answer_questions(questions or [], clauses, contract_id=contract_id)
+
+        # 법령 준수 검사
+        contract_type = extraction.contract_type.value if extraction.contract_type.value else None
+        compliance = self._check_compliance(clauses, contract_type=contract_type)
 
         return ContractAnalysisResult(
             document_id=ocr_result.document_id,
@@ -114,6 +119,7 @@ class ContractAnalysisChain:
             risks=risks,
             summary=summary,
             qa=qa,
+            compliance=compliance,
         )
 
     # ── 조항 분리 ─────────────────────────────────────────────────────────────
@@ -371,6 +377,21 @@ class ContractAnalysisChain:
             return rag.answer_batch(questions, clauses, contract_id=contract_id)
         except Exception:
             return self._answer_questions_fallback(questions, clauses)
+
+    # ── 법령 준수 검사 ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _check_compliance(
+        clauses: list[Clause],
+        contract_type: str | None = None,
+    ) -> list[Any]:
+        """법령 벡터 DB와 비교하여 조항별 준수 여부 판단. 실패 시 빈 리스트 반환."""
+        try:
+            from src.legal.compliance_chain import get_compliance_chain
+            chain = get_compliance_chain()
+            return chain.check_clauses(clauses, contract_type=contract_type)
+        except Exception:
+            return []
 
     def _answer_questions_fallback(self, questions: list[str], clauses: list[Clause]) -> list[QAResult]:
         fallback = clauses[0] if clauses else None
