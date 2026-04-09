@@ -146,6 +146,22 @@ class OCRPipeline:
         for page_result in result:
             if not page_result:
                 continue
+
+            # PaddleOCR v3: OCRResult 객체 (rec_texts 키)
+            if hasattr(page_result, "__getitem__"):
+                try:
+                    texts = page_result["rec_texts"]
+                    for text in texts:
+                        line_text = str(text).strip()
+                        if line_text:
+                            parsed_lines.append(line_text)
+                    continue
+                except (KeyError, TypeError):
+                    pass
+
+            # PaddleOCR v2: [[box, (text, score)], ...] 형식
+            if not isinstance(page_result, (list, tuple)):
+                continue
             for item in page_result:
                 if not item or len(item) < 2:
                     continue
@@ -155,6 +171,7 @@ class OCRPipeline:
                 line_text = str(text_info[0]).strip()
                 if line_text:
                     parsed_lines.append(line_text)
+
         return parsed_lines
 
     @staticmethod
