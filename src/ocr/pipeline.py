@@ -38,18 +38,21 @@ class OCRDocumentResult:
 
 
 class OCRPipeline:
-    """PaddleOCR 기반 텍스트 추출 파이프라인."""
+    """EasyOCR 기반 텍스트 추출 파이프라인 (Gemini 보정 포함)."""
 
     def __init__(
         self,
         *,
-        use_angle_cls: bool = True,
-        lang: str = "korean",
+        lang: list[str] | None = None,
         dpi: int = 180,
+        use_gpu: bool = False,
+        correct_with_llm: bool = True,
     ) -> None:
-        self.use_angle_cls = use_angle_cls
-        self.lang = lang
+        # EasyOCR은 언어 코드 리스트를 받음: 한국어 + 영어
+        self.lang = lang or ["ko", "en"]
         self.dpi = dpi
+        self.use_gpu = use_gpu
+        self.correct_with_llm = correct_with_llm
         self._ocr_engine: Any | None = None
 
     def extract(self, source: str | Path, *, document_id: str | None = None) -> OCRDocumentResult:
@@ -77,11 +80,15 @@ class OCRPipeline:
             pages = [self._extract_page(self._load_image(path), page_index=0)]
 
         raw_text = "\n\n".join(page.text for page in pages).strip()
+
+        # Gemini로 OCR 결과 보정
+        corrected_text = self._correct_with_gemini(raw_text) if self.correct_with_llm else raw_text
+
         return OCRDocumentResult(
             document_id=resolved_document_id,
             source_type=source_type,
             raw_text=raw_text,
-            normalized_text=self._normalize_text(raw_text),
+            normalized_text=self._normalize_text(corrected_text),
             pages=pages,
         )
 
@@ -103,21 +110,89 @@ class OCRPipeline:
 
     def _extract_page(self, image: np.ndarray, *, page_index: int) -> OCRPageResult:
         engine = self._get_ocr_engine()
-        result = engine.ocr(image)
+        # EasyOCR: readtext()는 [(bbox, text, confidence), ...] 반환
+        result = engine.readtext(image)
         lines = self._parse_ocr_lines(result)
         text = "\n".join(lines).strip()
         return OCRPageResult(page_index=page_index, text=text, lines=lines)
 
     def _get_ocr_engine(self) -> Any:
         if self._ocr_engine is None:
-            os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-            paddleocr = self._import_paddleocr()
-            self._ocr_engine = paddleocr.PaddleOCR(
-                use_angle_cls=self.use_angle_cls,
-                lang=self.lang,
-                show_log=False,
+            # macOS Python 3.x SSL 인증서 문제 해결
+            try:
+                import certifi
+                os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+                os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+            except ImportError:
+                pass
+
+            easyocr = self._import_easyocr()
+            self._ocr_engine = easyocr.Reader(
+                self.lang,
+                gpu=self.use_gpu,
+                verbose=False,
             )
         return self._ocr_engine
+
+    def _correct_with_gemini(self, raw_text: str) -> str:
+        """OCR 결과를 Gemini로 보정: 오탈자 수정, 줄 정렬, 계약서 형식 복원."""
+        if not raw_text.strip():
+            return raw_text
+
+        try:
+            from langchain_core.messages import HumanMessage
+            from src.llm.gemini import get_llm
+            llm = get_llm()
+        except Exception:
+            return raw_text
+
+        # 텍스트가 너무 길면 청크로 나눠서 처리
+        chunks = self._chunk_text(raw_text, max_chars=3000)
+        corrected_chunks: list[str] = []
+
+        for chunk in chunks:
+            prompt = f"""다음은 OCR로 추출된 한국어 계약서 텍스트입니다. 아래 규칙에 따라 보정하여 출력하세요.
+
+규칙:
+1. OCR 오탈자(예: "제 1 조" → "제1조", "갑 은" → "갑은")를 수정하세요.
+2. 잘못 분리된 단어를 붙이고, 잘못 합쳐진 단어를 분리하세요.
+3. 계약서의 조항 구조(제N조, 번호 목록)를 보존하세요.
+4. 내용을 추가하거나 삭제하지 마세요. 원문의 의미를 바꾸지 마세요.
+5. 보정된 텍스트만 출력하세요. 설명이나 주석을 추가하지 마세요.
+
+OCR 원문:
+{chunk}"""
+
+            try:
+                response = llm.invoke([HumanMessage(content=prompt)])
+                corrected_chunks.append(response.content.strip())
+            except Exception:
+                corrected_chunks.append(chunk)
+
+        return "\n\n".join(corrected_chunks)
+
+    @staticmethod
+    def _chunk_text(text: str, max_chars: int) -> list[str]:
+        """텍스트를 max_chars 이하의 청크로 분리 (줄 단위로 분리)."""
+        if len(text) <= max_chars:
+            return [text]
+
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_len = 0
+
+        for line in text.splitlines(keepends=True):
+            if current_len + len(line) > max_chars and current_lines:
+                chunks.append("".join(current_lines))
+                current_lines = []
+                current_len = 0
+            current_lines.append(line)
+            current_len += len(line)
+
+        if current_lines:
+            chunks.append("".join(current_lines))
+
+        return chunks
 
     @staticmethod
     def _detect_source_type(path: Path) -> SourceType:
@@ -139,38 +214,18 @@ class OCRPipeline:
 
     @staticmethod
     def _parse_ocr_lines(result: Any) -> list[str]:
+        """EasyOCR 결과 파싱: [(bbox, text, confidence), ...] 형식."""
         if not result:
             return []
 
         parsed_lines: list[str] = []
-        for page_result in result:
-            if not page_result:
+        for item in result:
+            if not item or len(item) < 2:
                 continue
-
-            # PaddleOCR v3: OCRResult 객체 (rec_texts 키)
-            if hasattr(page_result, "__getitem__"):
-                try:
-                    texts = page_result["rec_texts"]
-                    for text in texts:
-                        line_text = str(text).strip()
-                        if line_text:
-                            parsed_lines.append(line_text)
-                    continue
-                except (KeyError, TypeError):
-                    pass
-
-            # PaddleOCR v2: [[box, (text, score)], ...] 형식
-            if not isinstance(page_result, (list, tuple)):
-                continue
-            for item in page_result:
-                if not item or len(item) < 2:
-                    continue
-                text_info = item[1]
-                if not text_info:
-                    continue
-                line_text = str(text_info[0]).strip()
-                if line_text:
-                    parsed_lines.append(line_text)
+            # item[1]이 텍스트, item[2]가 confidence (없을 수도 있음)
+            line_text = str(item[1]).strip()
+            if line_text:
+                parsed_lines.append(line_text)
 
         return parsed_lines
 
@@ -186,15 +241,14 @@ class OCRPipeline:
         return normalized.strip()
 
     @staticmethod
-    def _import_paddleocr() -> Any:
+    def _import_easyocr() -> Any:
         try:
-            import paddleocr
+            import easyocr
         except ImportError as exc:
             raise RuntimeError(
-                "paddleocr is not installed in the active environment. "
-                "Activate .venv and install dependencies with `python -m pip install -e .`."
+                "easyocr is not installed. Install with `pip install easyocr`."
             ) from exc
-        return paddleocr
+        return easyocr
 
     @staticmethod
     def _import_pdfium() -> Any:
@@ -202,7 +256,6 @@ class OCRPipeline:
             import pypdfium2 as pdfium
         except ImportError as exc:
             raise RuntimeError(
-                "pypdfium2 is required for PDF OCR. Install dependencies with "
-                "`python -m pip install -e .`."
+                "pypdfium2 is required for PDF OCR. Install with `pip install pypdfium2`."
             ) from exc
         return pdfium
