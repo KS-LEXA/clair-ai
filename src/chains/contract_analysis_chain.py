@@ -63,6 +63,7 @@ class ContractAnalysisResult:
     risks: list[RiskResult]
     summary: str
     qa: list[QAResult]
+    compliance: list[Any] | None = None  # list[ComplianceResult] — 지연 임포트
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,7 @@ class ContractAnalysisResult:
             "risks": [asdict(risk) for risk in self.risks],
             "summary": self.summary,
             "qa": [asdict(item) for item in self.qa],
+            "compliance": [asdict(c) for c in self.compliance] if self.compliance else [],
         }
 
 
@@ -99,7 +101,15 @@ class ContractAnalysisChain:
         extraction = self._extract_fields(ocr_result.normalized_text)
         risks = self._detect_risks(clauses)
         summary = self._summarize(clauses, extraction)
-        qa = self._answer_questions(questions or [], clauses)
+
+        # RAG Q&A: 조항 임베딩 인덱싱
+        contract_id = ocr_result.document_id
+        self._index_clauses(contract_id, clauses)
+        qa = self._answer_questions(questions or [], clauses, contract_id=contract_id)
+
+        # 법령 준수 검사
+        contract_type = extraction.contract_type.value if extraction.contract_type.value else None
+        compliance = self._check_compliance(clauses, contract_type=contract_type)
 
         return ContractAnalysisResult(
             document_id=ocr_result.document_id,
@@ -109,6 +119,7 @@ class ContractAnalysisChain:
             risks=risks,
             summary=summary,
             qa=qa,
+            compliance=compliance,
         )
 
     # ── 조항 분리 ─────────────────────────────────────────────────────────────
@@ -336,58 +347,51 @@ class ContractAnalysisChain:
             parts.append(f"계약 금액: {extraction.amount_text.value}")
         return " ".join(parts)
 
-    # ── LLM: Q&A ─────────────────────────────────────────────────────────────
+    # ── RAG: 조항 인덱싱 ─────────────────────────────────────────────────────
 
-    def _answer_questions(self, questions: list[str], clauses: list[Clause]) -> list[QAResult]:
+    @staticmethod
+    def _index_clauses(contract_id: str, clauses: list[Clause]) -> None:
+        """조항을 벡터 DB에 인덱싱. 실패해도 분석 전체를 중단하지 않음."""
+        if not clauses:
+            return
+        try:
+            from src.rag.vector_store import get_vector_store
+            get_vector_store().index_clauses(contract_id, clauses)
+        except Exception:
+            pass  # 임베딩 실패 시 RAG 폴백(키워드 검색)으로 자동 대체
+
+    # ── LLM: Q&A (RAG) ───────────────────────────────────────────────────────
+
+    def _answer_questions(
+        self,
+        questions: list[str],
+        clauses: list[Clause],
+        contract_id: str | None = None,
+    ) -> list[QAResult]:
         if not questions:
             return []
 
         try:
-            from src.llm.gemini import get_llm
-            llm = get_llm()
+            from src.rag.rag_chain import get_rag_chain
+            rag = get_rag_chain()
+            return rag.answer_batch(questions, clauses, contract_id=contract_id)
         except Exception:
             return self._answer_questions_fallback(questions, clauses)
 
-        clauses_text = "\n\n".join(
-            f"[{c.clause_id}] {c.title or ''}\n{c.text[:500]}"
-            for c in clauses[:20]
-        )
+    # ── 법령 준수 검사 ────────────────────────────────────────────────────────
 
-        results: list[QAResult] = []
-        for question in questions:
-            prompt = f"""다음 계약서 조항들을 바탕으로 질문에 답하세요.
-답변과 함께 근거가 된 조항 ID(clause-XXX 형식)를 포함한 JSON으로만 응답하세요.
-
-{{
-  "answer": "질문에 대한 답변 (한국어, 2-4문장)",
-  "evidence_clause_ids": ["clause-001", "clause-002"]
-}}
-
-계약서 조항:
-{clauses_text}
-
-질문: {question}"""
-
-            try:
-                response = llm.invoke([HumanMessage(content=prompt)])
-                raw = response.content.strip()
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                data = json.loads(raw)
-                results.append(QAResult(
-                    question=question,
-                    answer=data.get("answer", "답변을 생성할 수 없습니다."),
-                    evidence_clause_ids=data.get("evidence_clause_ids", []),
-                ))
-            except Exception:
-                fallback = clauses[0] if clauses else None
-                results.append(QAResult(
-                    question=question,
-                    answer="답변 생성 중 오류가 발생했습니다.",
-                    evidence_clause_ids=[fallback.clause_id] if fallback else [],
-                ))
-
-        return results
+    @staticmethod
+    def _check_compliance(
+        clauses: list[Clause],
+        contract_type: str | None = None,
+    ) -> list[Any]:
+        """법령 벡터 DB와 비교하여 조항별 준수 여부 판단. 실패 시 빈 리스트 반환."""
+        try:
+            from src.legal.compliance_chain import get_compliance_chain
+            chain = get_compliance_chain()
+            return chain.check_clauses(clauses, contract_type=contract_type)
+        except Exception:
+            return []
 
     def _answer_questions_fallback(self, questions: list[str], clauses: list[Clause]) -> list[QAResult]:
         fallback = clauses[0] if clauses else None
