@@ -31,6 +31,7 @@ class QARequest(BaseModel):
     contract_id: int
     question: str
     clauses: list[dict[str, Any]]   # [{clause_id, title, text}]
+    use_rag: bool = True             # False이면 전체 조항 직접 LLM 전달
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
@@ -67,8 +68,9 @@ def analyze(req: AnalyzeRequest) -> dict[str, Any]:
 @app.post("/qa", tags=["질의응답"])
 def qa(req: QARequest) -> dict[str, Any]:
     """
-    clair-backend가 이미 DB에 저장한 조항 리스트를 받아 QA 수행.
-    OCR 재실행 없이 빠르게 답변 가능.
+    clair-backend가 이미 DB에 저장한 조항 리스트를 받아 RAG Q&A 수행.
+    - use_rag=True (기본): 벡터 검색으로 관련 조항만 찾아 LLM 전달
+    - use_rag=False: 전체 조항을 LLM에 직접 전달 (조항 수가 적을 때 유용)
     """
     clauses = [
         Clause(
@@ -82,16 +84,29 @@ def qa(req: QARequest) -> dict[str, Any]:
     ]
 
     try:
-        results = _chain._answer_questions([req.question], clauses)
+        if req.use_rag:
+            from src.rag.rag_chain import get_rag_chain
+            from src.rag.vector_store import get_vector_store
+
+            store = get_vector_store()
+            # 인덱스가 없으면 요청 조항으로 즉시 인덱싱
+            if not store.has_index(req.contract_id):
+                store.index_clauses(req.contract_id, clauses)
+
+            rag = get_rag_chain()
+            result = rag.answer(req.question, clauses, contract_id=req.contract_id)
+        else:
+            results = _chain._answer_questions([req.question], clauses)
+            result = results[0] if results else None
+
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-    if not results:
+    if not result:
         return {"question": req.question, "answer": "답변을 생성할 수 없습니다.", "evidence_clause_ids": []}
 
-    qa_result = results[0]
     return {
-        "question": qa_result.question,
-        "answer": qa_result.answer,
-        "evidence_clause_ids": qa_result.evidence_clause_ids,
+        "question": result.question,
+        "answer": result.answer,
+        "evidence_clause_ids": result.evidence_clause_ids,
     }
