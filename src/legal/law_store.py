@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,7 +59,7 @@ class LawVectorStore:
         이미 데이터가 있으면 건너뜀 (force=True면 재구축).
         반환값: 인덱싱된 조항 수
         """
-        from src.legal.fetcher import get_all_articles
+        from src.legal.fetcher import fetch_articles
         from src.rag.embedder import embed_texts
 
         with self._lock:
@@ -75,9 +76,19 @@ class LawVectorStore:
                     metadata={"hnsw:space": "cosine"},
                 )
 
-            articles = get_all_articles()
+            articles = fetch_articles()  # API 키 있으면 law.go.kr, 없으면 정적 데이터
             if not articles:
                 return 0
+
+            # 동일 법령+조문번호 중복 제거 (API가 같은 조문을 여러 번 반환할 수 있음)
+            seen_ids: set[str] = set()
+            unique_articles = []
+            for a in articles:
+                uid = f"{a.law_name}_{a.article_no}"
+                if uid not in seen_ids:
+                    seen_ids.add(uid)
+                    unique_articles.append(a)
+            articles = unique_articles
 
             texts = [f"{a.law_name} {a.article_no} {a.article_title}\n{a.content}" for a in articles]
             ids = [f"{a.law_name}_{a.article_no}" for a in articles]
@@ -92,8 +103,13 @@ class LawVectorStore:
                 for a in articles
             ]
 
-            vectors = embed_texts(texts)
-            collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+            # Gemini 임베딩 API: 1배치 최대 100개 제한 → 청크로 나눠서 처리
+            BATCH_SIZE = 100
+            all_vectors = []
+            for i in range(0, len(texts), BATCH_SIZE):
+                all_vectors.extend(embed_texts(texts[i:i + BATCH_SIZE]))
+
+            collection.add(ids=ids, embeddings=all_vectors, documents=texts, metadatas=metadatas)
             self._initialized = True
             return len(articles)
 
@@ -113,33 +129,23 @@ class LawVectorStore:
         if collection.count() == 0:
             return []
 
-        where = None
-        if contract_type:
-            # ChromaDB where 필터: contract_types 문자열에 포함 여부
-            where = {"contract_types": {"$contains": contract_type}}
-
-        try:
-            query_vector = embed_query(query)
-            result = collection.query(
-                query_embeddings=[query_vector],
-                n_results=min(top_k, collection.count()),
-                include=["metadatas", "distances"],
-                where=where,
-            )
-        except Exception:
-            # where 필터 실패 시 필터 없이 재시도
-            query_vector = embed_query(query)
-            result = collection.query(
-                query_embeddings=[query_vector],
-                n_results=min(top_k, collection.count()),
-                include=["metadatas", "distances"],
-            )
+        # contract_type 필터는 Python 쪽에서 처리 (ChromaDB where 미사용)
+        fetch_k = collection.count()
+        query_vector = embed_query(query)
+        result = collection.query(
+            query_embeddings=[query_vector],
+            n_results=min(fetch_k, collection.count()),
+            include=["metadatas", "distances"],
+        )
 
         results: list[LawSearchResult] = []
         for meta, dist in zip(
             result.get("metadatas", [[]])[0],
             result.get("distances", [[]])[0],
         ):
+            # contract_type 필터 — 저장된 값이 comma-separated string
+            if contract_type and contract_type not in meta.get("contract_types", ""):
+                continue
             results.append(LawSearchResult(
                 law_name=meta["law_name"],
                 article_no=meta["article_no"],
@@ -147,6 +153,8 @@ class LawVectorStore:
                 content=meta["content"],
                 score=1.0 - dist,
             ))
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -178,6 +186,9 @@ def ensure_law_db_initialized() -> int:
     Gemini API 키 없으면 건너뜀 (임베딩 불가).
     """
     import os
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parents[2] / ".env")
+
     if not os.environ.get("GEMINI_API_KEY", ""):
         return 0
     try:
