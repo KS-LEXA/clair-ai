@@ -59,7 +59,7 @@ class LawVectorStore:
         이미 데이터가 있으면 건너뜀 (force=True면 재구축).
         반환값: 인덱싱된 조항 수
         """
-        from src.legal.fetcher import get_all_articles
+        from src.legal.fetcher import fetch_articles
         from src.rag.embedder import embed_texts
 
         with self._lock:
@@ -76,9 +76,19 @@ class LawVectorStore:
                     metadata={"hnsw:space": "cosine"},
                 )
 
-            articles = get_all_articles()
+            articles = fetch_articles()  # API 키 있으면 law.go.kr, 없으면 정적 데이터
             if not articles:
                 return 0
+
+            # 동일 법령+조문번호 중복 제거 (API가 같은 조문을 여러 번 반환할 수 있음)
+            seen_ids: set[str] = set()
+            unique_articles = []
+            for a in articles:
+                uid = f"{a.law_name}_{a.article_no}"
+                if uid not in seen_ids:
+                    seen_ids.add(uid)
+                    unique_articles.append(a)
+            articles = unique_articles
 
             texts = [f"{a.law_name} {a.article_no} {a.article_title}\n{a.content}" for a in articles]
             ids = [f"{a.law_name}_{a.article_no}" for a in articles]
@@ -93,8 +103,13 @@ class LawVectorStore:
                 for a in articles
             ]
 
-            vectors = embed_texts(texts)
-            collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+            # Gemini 임베딩 API: 1배치 최대 100개 제한 → 청크로 나눠서 처리
+            BATCH_SIZE = 100
+            all_vectors = []
+            for i in range(0, len(texts), BATCH_SIZE):
+                all_vectors.extend(embed_texts(texts[i:i + BATCH_SIZE]))
+
+            collection.add(ids=ids, embeddings=all_vectors, documents=texts, metadatas=metadatas)
             self._initialized = True
             return len(articles)
 
