@@ -27,8 +27,8 @@ class LawArticle:
 def fetch_from_law_api(law_name: str, max_articles: int = 50) -> list[LawArticle]:
     """
     law.go.kr Open API에서 법령 조문을 가져옴.
+    2단계: lawSearch.do → 법령일련번호(MST) 조회 → lawService.do → 조문 파싱.
     API 키는 환경변수 LAW_API_KEY에 설정.
-    https://open.law.go.kr 에서 무료 발급 가능.
     """
     api_key = os.environ.get("LAW_API_KEY", "")
     if not api_key:
@@ -39,41 +39,77 @@ def fetch_from_law_api(law_name: str, max_articles: int = 50) -> list[LawArticle
     except ImportError as exc:
         raise RuntimeError("httpx가 필요합니다: pip install httpx") from exc
 
-    BASE_URL = "https://www.law.go.kr/DRF/lawService.do"
-    params = {
-        "OC": api_key,
-        "target": "law",
-        "type": "XML",
-        "query": law_name,
-    }
+    # Step 1: 법령 검색 → MST(법령일련번호) 획득
+    search_resp = httpx.get(
+        "https://www.law.go.kr/DRF/lawSearch.do",
+        params={"OC": api_key, "target": "law", "type": "XML", "query": law_name, "display": 1},
+        timeout=10,
+    )
+    search_resp.raise_for_status()
+    mst = _extract_mst(search_resp.text)
+    if not mst:
+        return []
 
-    resp = httpx.get(BASE_URL, params=params, timeout=10)
-    resp.raise_for_status()
+    # Step 2: MST로 전체 조문 조회
+    content_resp = httpx.get(
+        "https://www.law.go.kr/DRF/lawService.do",
+        params={"OC": api_key, "target": "law", "MST": mst, "type": "XML"},
+        timeout=15,
+    )
+    content_resp.raise_for_status()
 
-    return _parse_law_xml(resp.text, max_articles)
+    return _parse_law_xml(content_resp.text, law_name, max_articles)
 
 
-def _parse_law_xml(xml_text: str, max_articles: int) -> list[LawArticle]:
-    """law.go.kr XML 응답 파싱."""
+def _extract_mst(xml_text: str) -> str:
+    """lawSearch.do 응답에서 법령일련번호(MST) 추출."""
     import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+        return root.findtext(".//법령일련번호", default="")
+    except Exception:
+        return ""
+
+
+def _parse_law_xml(xml_text: str, law_name: str, max_articles: int) -> list[LawArticle]:
+    """lawService.do XML 응답 파싱. <조문단위> 태그 기준."""
+    import xml.etree.ElementTree as ET
+    import re
 
     articles: list[LawArticle] = []
     try:
         root = ET.fromstring(xml_text)
-        law_name = root.findtext(".//법령명한글", default="")
-        for jo in root.findall(".//조문")[:max_articles]:
-            no = jo.findtext("조문번호", default="")
-            title = jo.findtext("조문제목", default="")
-            content_parts = [item.text or "" for item in jo.findall(".//항")]
-            content = " ".join(content_parts).strip() or jo.findtext("조문내용", default="")
-            if content:
+        contract_types = _infer_contract_types(law_name)
+
+        for jo in root.findall(".//조문단위"):
+            # 전문(장 제목 등) 제외, 실제 조문만 파싱
+            if jo.findtext("조문여부", default="") != "조문":
+                continue
+
+            no = jo.findtext("조문번호", default="").strip()
+            title = jo.findtext("조문제목", default="").strip()
+            content = jo.findtext("조문내용", default="").strip()
+
+            # 조문내용이 없으면 항 내용을 합쳐서 사용
+            if not content:
+                parts = [h.findtext("항내용", default="").strip() for h in jo.findall("항")]
+                content = " ".join(p for p in parts if p)
+
+            # 개정 메타태그 제거 (<개정 ...>)
+            content = re.sub(r"<[^>]+>", "", content).strip()
+
+            if no and content:
                 articles.append(LawArticle(
                     law_name=law_name,
                     article_no=f"제{no}조",
                     article_title=title,
-                    content=content,
-                    contract_types=_infer_contract_types(law_name),
+                    content=content[:500],  # 너무 긴 조문은 잘라서 저장
+                    contract_types=contract_types,
                 ))
+
+            if len(articles) >= max_articles:
+                break
+
     except Exception:
         pass
 
@@ -272,20 +308,34 @@ def get_all_articles() -> list[LawArticle]:
     return STATIC_LAW_ARTICLES
 
 
+_LAW_NAMES_BY_TYPE: dict[str, list[str]] = {
+    "근로계약": ["근로기준법", "최저임금법"],
+    "용역계약": ["민법", "하도급거래 공정화에 관한 법률"],
+    "NDA": ["부정경쟁방지 및 영업비밀보호에 관한 법률"],
+    "임대차계약": ["주택임대차보호법"],
+}
+
+
 def fetch_articles(contract_type: str | None = None) -> list[LawArticle]:
     """
     법령 조항 로드.
     LAW_API_KEY가 있으면 API 호출, 없으면 정적 데이터 사용.
+    contract_type=None이면 모든 유형의 법령을 가져옴.
     """
     api_key = os.environ.get("LAW_API_KEY", "")
     if api_key:
-        law_names = {
-            "근로계약": ["근로기준법", "최저임금법"],
-            "용역계약": ["민법", "하도급거래 공정화에 관한 법률"],
-            "NDA": ["부정경쟁방지 및 영업비밀보호에 관한 법률"],
-            "임대차계약": ["주택임대차보호법"],
-        }
-        target_laws = law_names.get(contract_type or "", [])
+        if contract_type:
+            target_laws = _LAW_NAMES_BY_TYPE.get(contract_type, [])
+        else:
+            # 모든 유형의 법령을 중복 없이 수집
+            seen: set[str] = set()
+            target_laws = []
+            for laws in _LAW_NAMES_BY_TYPE.values():
+                for law in laws:
+                    if law not in seen:
+                        seen.add(law)
+                        target_laws.append(law)
+
         articles: list[LawArticle] = []
         for law in target_laws:
             try:
