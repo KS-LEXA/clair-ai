@@ -213,7 +213,10 @@ class ContractAnalysisChain:
             return self._extract_fields_fallback(text)
 
     def _extract_fields_fallback(self, text: str) -> ExtractionResult:
-        date_pattern = re.compile(r"(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})")
+        # 서양식(2024-01-15, 2024.01.15)과 한국어식(2024년 01월 15일) 모두 지원
+        date_pattern = re.compile(
+            r"\d{4}년\s*\d{1,2}월\s*\d{1,2}일|\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}"
+        )
         amount_pattern = re.compile(r"([0-9][0-9,]*(?:원|KRW|만원))")
         dates = date_pattern.findall(text)
         amount_match = amount_pattern.search(text)
@@ -412,12 +415,15 @@ class ContractAnalysisChain:
 
     @staticmethod
     def _classify_contract_type(text: str) -> str:
-        if "비밀유지" in text or "nda" in text.lower():
-            return "NDA"
-        if "근로" in text or "고용" in text:
+        # 구체적인 계약서 명칭을 먼저 확인 (비밀유지 조항이 포함된 근로계약서 오분류 방지)
+        if "근로계약" in text or "근로" in text or "고용" in text:
             return "근로계약"
+        if "비밀유지계약" in text or "기밀유지계약" in text or "nda" in text.lower():
+            return "NDA"
         if "용역" in text or "서비스" in text:
             return "용역계약"
+        if "임대차" in text or "임대" in text:
+            return "임대차계약"
         return "unknown"
 
     @staticmethod
