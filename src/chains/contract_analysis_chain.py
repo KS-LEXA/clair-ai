@@ -96,20 +96,50 @@ class ContractAnalysisChain:
         document_id: str | None = None,
         questions: list[str] | None = None,
     ) -> ContractAnalysisResult:
-        ocr_result = self.ocr_pipeline.extract(source, document_id=document_id)
-        clauses = self._split_clauses(ocr_result)
-        extraction = self._extract_fields(ocr_result.normalized_text)
-        risks = self._detect_risks(clauses)
-        summary = self._summarize(clauses, extraction)
+        import time
+        t0 = time.time()
+        doc_id = document_id or str(source)
+        print(f"\n{'='*48}")
+        print(f"🚀 [AI] 분석 시작 (ID: {doc_id})")
+        print(f"📂 [AI] 파일: {source}")
 
-        # RAG Q&A: 조항 임베딩 인덱싱
+        print("1️⃣  OCR 시작")
+        ocr_result = self.ocr_pipeline.extract(source, document_id=document_id)
+        print(f"2️⃣  OCR 완료 — 텍스트 {len(ocr_result.raw_text)}자")
+
+        print("3️⃣  조항 분리 시작")
+        clauses = self._split_clauses(ocr_result)
+        print(f"4️⃣  조항 분리 완료 — {len(clauses)}개")
+
+        print("5️⃣  핵심 정보 추출 시작")
+        extraction = self._extract_fields(ocr_result.normalized_text)
+        print(f"6️⃣  핵심 정보 추출 완료 — 계약유형: {extraction.contract_type.value or 'unknown'}")
+
+        print("7️⃣  리스크 분석 시작")
+        risks = self._detect_risks(clauses)
+        print(f"8️⃣  리스크 분석 완료 — {len(risks)}개")
+
+        print("9️⃣  요약 생성 시작")
+        summary = self._summarize(clauses, extraction)
+        print(f"🔟  요약 생성 완료")
+
+        print("1️⃣1️⃣ 벡터 인덱싱 시작")
         contract_id = ocr_result.document_id
         self._index_clauses(contract_id, clauses)
-        qa = self._answer_questions(questions or [], clauses, contract_id=contract_id)
+        print("1️⃣2️⃣ 벡터 인덱싱 완료")
 
-        # 법령 준수 검사
+        print("1️⃣3️⃣ Q&A 처리 시작")
+        qa = self._answer_questions(questions or [], clauses, contract_id=contract_id)
+        print("1️⃣4️⃣ Q&A 처리 완료")
+
+        print("1️⃣5️⃣ 법령 준수 검사 시작")
         contract_type = extraction.contract_type.value if extraction.contract_type.value else None
         compliance = self._check_compliance(clauses, contract_type=contract_type)
+        print("1️⃣6️⃣ 법령 준수 검사 완료")
+
+        elapsed = time.time() - t0
+        print(f"✅ [AI] 분석 완료 — 소요 시간: {elapsed:.2f}초")
+        print(f"{'='*48}\n")
 
         return ContractAnalysisResult(
             document_id=ocr_result.document_id,
@@ -168,7 +198,9 @@ class ContractAnalysisChain:
         try:
             from src.llm.gemini import get_llm
             llm = get_llm()
-        except Exception:
+            print("   ↳ Gemini 핵심 정보 추출 호출")
+        except Exception as e:
+            print(f"   ↳ Gemini 초기화 실패, fallback 사용: {e}")
             return self._extract_fields_fallback(text)
 
         prompt = f"""다음 계약서 본문에서 핵심 정보를 추출하여 JSON 형식으로만 응답하세요.
@@ -242,7 +274,9 @@ class ContractAnalysisChain:
         try:
             from src.llm.gemini import get_llm
             llm = get_llm()
-        except Exception:
+            print("   ↳ Gemini 리스크 분석 호출")
+        except Exception as e:
+            print(f"   ↳ Gemini 초기화 실패, fallback 사용: {e}")
             return self._detect_risks_fallback(clauses)
 
         clauses_text = "\n\n".join(
@@ -318,7 +352,9 @@ class ContractAnalysisChain:
         try:
             from src.llm.gemini import get_llm
             llm = get_llm()
-        except Exception:
+            print("   ↳ Gemini 요약 호출")
+        except Exception as e:
+            print(f"   ↳ Gemini 초기화 실패, fallback 사용: {e}")
             return self._summarize_fallback(clauses, extraction)
 
         full_text = "\n\n".join(

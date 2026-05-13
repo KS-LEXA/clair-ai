@@ -31,6 +31,17 @@ async def lifespan(app: FastAPI):
             print("[clair-ai] 법령 DB 초기화 건너뜀 (GEMINI_API_KEY 없음)")
     except Exception as e:
         print(f"[clair-ai] 법령 DB 초기화 실패 (무시): {e}")
+
+    # EasyOCR 모델 미리 로드 (첫 분석 지연 방지)
+    try:
+        import asyncio
+        print("[clair-ai] EasyOCR 모델 워밍업 시작...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: _chain.ocr_pipeline._get_ocr_engine())
+        print("[clair-ai] EasyOCR 모델 워밍업 완료")
+    except Exception as e:
+        print(f"[clair-ai] EasyOCR 워밍업 실패 (무시): {e}")
+
     yield
 
 
