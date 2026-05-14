@@ -136,9 +136,15 @@ class RAGChain:
     def _fallback_answer(question: str, clauses: list[Clause]) -> QAResult:
         from src.chains.contract_analysis_chain import QAResult
 
+        if clauses:
+            excerpt = clauses[0].text[:300]
+            answer = f"관련 조항을 찾았습니다:\n\n\"{excerpt}...\"\n\n정확한 답변을 위해 잠시 후 다시 질문해주세요."
+        else:
+            answer = "해당 질문과 관련된 조항을 찾지 못했습니다. 다른 방식으로 질문해보세요."
+
         return QAResult(
             question=question,
-            answer="LLM 연결 실패로 답변을 생성할 수 없습니다.",
+            answer=answer,
             evidence_clause_ids=[c.clause_id for c in clauses[:2]],
         )
 
