@@ -45,6 +45,10 @@ class RiskResult:
     reason: str
     evidence_clause_ids: list[str]
     evidence_text: str
+    severity_score: int = 5       # 1~10 심각도 수치
+    confidence: float = 0.7       # 0.0~1.0 신뢰도
+    title: str = ""               # 사용자 친화적 위험 조항명 (한국어)
+    problematic_text: str = ""    # 위험 판단 근거 원문
 
 
 @dataclass(slots=True)
@@ -284,18 +288,38 @@ class ContractAnalysisChain:
             for c in clauses[:20]  # 최대 20개 조항
         )
 
-        prompt = f"""다음 계약서 조항들에서 법적 리스크를 분석하여 아래 JSON 배열 형식으로만 응답하세요.
-리스크가 없으면 빈 배열 []을 반환하세요.
+        prompt = f"""계약서를 분석하여 위험 조항만 추출하세요.
 
-[
-  {{
-    "risk_type": "리스크 유형 (auto_renewal/termination/liability/payment/ip/confidentiality/기타)",
-    "severity": "심각도 (high/medium/low)",
-    "reason": "리스크 이유 (한국어 1-2문장)",
-    "evidence_clause_ids": ["clause-001"],
-    "evidence_text": "관련 조항 원문 발췌 (100자 이내)"
-  }}
-]
+최종 safety_score는 계산하지 마세요.
+점수 계산은 백엔드에서 수행합니다.
+
+각 위험 조항마다 아래 정보를 반드시 포함하세요.
+
+- title
+- category
+- risk_level (low | medium | high)
+- severity (1~10 정수)
+- confidence (0.0~1.0)
+- problematic_text
+- reason
+
+규칙:
+- severity는 실제 위험도를 세밀하게 판단하세요.
+- 모든 조항에 비슷한 점수를 주지 마세요.
+- reason은 사용자 친화적으로 작성하세요.
+- problematic_text에는 위험 판단 근거가 된 계약서 원문을 넣으세요.
+- 위험하지 않은 일반 조항은 제외하세요.
+
+category는 아래 중 하나만 사용:
+payment, liability, termination, confidentiality, renewal, penalty, ip, dispute, warranty, privacy, etc
+
+좋은 title 예시:
+- "손해배상 무제한"
+- "자동 갱신 조항"
+- "일방적 계약 해지"
+
+반드시 JSON 배열만 반환하세요.
+마크다운, 설명, 코드블록 없이 순수 JSON만 출력하세요.
 
 계약서 조항:
 {clauses_text}"""
@@ -309,11 +333,15 @@ class ContractAnalysisChain:
 
             return [
                 RiskResult(
-                    risk_type=item.get("risk_type", "unknown"),
-                    severity=item.get("severity", "medium"),
+                    title=item.get("title", ""),
+                    risk_type=item.get("category", "unknown"),
+                    severity=item.get("risk_level", "medium"),
+                    severity_score=max(1, min(10, int(item.get("severity", 5)))),
+                    confidence=max(0.0, min(1.0, float(item.get("confidence", 0.7)))),
                     reason=item.get("reason", ""),
-                    evidence_clause_ids=item.get("evidence_clause_ids", []),
-                    evidence_text=item.get("evidence_text", ""),
+                    problematic_text=item.get("problematic_text", ""),
+                    evidence_clause_ids=[],
+                    evidence_text=item.get("problematic_text", ""),
                 )
                 for item in data
                 if isinstance(item, dict)
@@ -322,20 +350,28 @@ class ContractAnalysisChain:
             return self._detect_risks_fallback(clauses)
 
     def _detect_risks_fallback(self, clauses: list[Clause]) -> list[RiskResult]:
+        # (risk_type, severity, keywords, severity_score)
         rules = [
-            ("auto_renewal", "medium", ("자동 갱신", "묵시적 갱신")),
-            ("termination", "high", ("일방 해지", "즉시 해지")),
-            ("liability", "high", ("손해배상", "배상 책임")),
-            ("payment", "medium", ("지급 기한", "지급 조건")),
+            ("auto_renewal",    "medium", ("자동 갱신", "묵시적 갱신", "자동으로 연장"),        5),
+            ("termination",     "high",   ("일방 해지", "즉시 해지", "일방적으로 해지", "사전 통보 없이"), 8),
+            ("liability",       "high",   ("손해배상", "배상 책임", "무한책임", "연대보증"),     9),
+            ("payment",         "medium", ("지급 기한", "지급 조건", "지체상금", "연체이자"),    5),
+            ("confidentiality", "medium", ("비밀유지", "기밀유지", "영업비밀", "정보 유출"),     5),
+            ("ip",              "high",   ("지식재산권", "저작권 귀속", "특허", "발명의 권리"), 8),
+            ("non_compete",     "high",   ("경업금지", "전직 금지", "동종업계", "경쟁사 취업"), 8),
+            ("penalty",         "high",   ("위약금", "위약벌", "손해배상액 예정"),              9),
+            ("unilateral",      "high",   ("갑의 재량", "을의 동의 없이", "일방적으로 변경"),   7),
         ]
         findings: list[RiskResult] = []
         for clause in clauses:
-            for risk_type, severity, keywords in rules:
+            for risk_type, severity, keywords, severity_score in rules:
                 for keyword in keywords:
                     if keyword in clause.text:
                         findings.append(RiskResult(
                             risk_type=risk_type,
                             severity=severity,
+                            severity_score=severity_score,
+                            confidence=0.6,
                             reason=f"'{keyword}' 관련 조항이 포함되어 있어 검토가 필요합니다.",
                             evidence_clause_ids=[clause.clause_id],
                             evidence_text=clause.text[:300],
