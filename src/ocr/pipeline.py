@@ -38,20 +38,22 @@ class OCRDocumentResult:
 
 
 class OCRPipeline:
-    """EasyOCR 기반 텍스트 추출 파이프라인 (Gemini 보정 포함)."""
+    """PaddleOCR v5 기반 텍스트 추출 파이프라인 (Gemini 보정 포함).
+
+    PDF는 PyMuPDF로 텍스트 레이어를 먼저 시도하고,
+    텍스트가 부족한 페이지만 PaddleOCR로 폴백한다.
+    """
+
+    # 페이지당 텍스트가 이 글자 수 이상이면 OCR 스킵
+    _TEXT_LAYER_MIN_CHARS = 50
 
     def __init__(
         self,
         *,
-        lang: list[str] | None = None,
-        dpi: int = 180,
-        use_gpu: bool = False,
+        dpi: int = 150,
         correct_with_llm: bool = True,
     ) -> None:
-        # EasyOCR은 언어 코드 리스트를 받음: 한국어 + 영어
-        self.lang = lang or ["ko", "en"]
         self.dpi = dpi
-        self.use_gpu = use_gpu
         self.correct_with_llm = correct_with_llm
         self._ocr_engine: Any | None = None
 
@@ -81,7 +83,6 @@ class OCRPipeline:
 
         raw_text = "\n\n".join(page.text for page in pages).strip()
 
-        # Gemini로 OCR 결과 보정
         corrected_text = self._correct_with_gemini(raw_text) if self.correct_with_llm else raw_text
 
         return OCRDocumentResult(
@@ -93,44 +94,48 @@ class OCRPipeline:
         )
 
     def _extract_from_pdf(self, path: Path) -> list[OCRPageResult]:
-        pdfium = self._import_pdfium()
-        pdf = pdfium.PdfDocument(str(path))
+        fitz = self._import_fitz()
+        doc = fitz.open(str(path))
         scale = self.dpi / 72
         pages: list[OCRPageResult] = []
 
-        for page_index in range(len(pdf)):
-            page = pdf.get_page(page_index)
-            pil_image = page.render(scale=scale).to_pil()
-            image = np.array(pil_image)
-            pages.append(self._extract_page(image, page_index=page_index))
-            page.close()
+        for page_index in range(len(doc)):
+            pdf_page = doc[page_index]
 
-        pdf.close()
+            # 텍스트 레이어 우선 시도 — 스캔본이 아니면 OCR 불필요
+            native_text = pdf_page.get_text().strip()
+            if len(native_text) >= self._TEXT_LAYER_MIN_CHARS:
+                lines = self._split_lines(native_text)
+                pages.append(OCRPageResult(page_index=page_index, text=native_text, lines=lines))
+                continue
+
+            # 텍스트 레이어 없음 → 이미지로 렌더링 후 OCR
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img = img[:, :, :3]
+            pages.append(self._extract_page(img, page_index=page_index))
+
+        doc.close()
         return pages
 
     def _extract_page(self, image: np.ndarray, *, page_index: int) -> OCRPageResult:
         engine = self._get_ocr_engine()
-        # EasyOCR: readtext()는 [(bbox, text, confidence), ...] 반환
-        result = engine.readtext(image)
+        result = engine.predict(image)
         lines = self._parse_ocr_lines(result)
         text = "\n".join(lines).strip()
         return OCRPageResult(page_index=page_index, text=text, lines=lines)
 
     def _get_ocr_engine(self) -> Any:
         if self._ocr_engine is None:
-            # macOS Python 3.x SSL 인증서 문제 해결
-            try:
-                import certifi
-                os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-                os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
-            except ImportError:
-                pass
-
-            easyocr = self._import_easyocr()
-            self._ocr_engine = easyocr.Reader(
-                self.lang,
-                gpu=self.use_gpu,
-                verbose=False,
+            PaddleOCR = self._import_paddleocr()
+            self._ocr_engine = PaddleOCR(
+                text_detection_model_name="PP-OCRv5_mobile_det",
+                text_recognition_model_name="korean_PP-OCRv5_mobile_rec",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                device="cpu",
             )
         return self._ocr_engine
 
@@ -146,7 +151,6 @@ class OCRPipeline:
         except Exception:
             return raw_text
 
-        # 텍스트가 너무 길면 청크로 나눠서 처리
         chunks = self._chunk_text(raw_text, max_chars=3000)
         corrected_chunks: list[str] = []
 
@@ -173,7 +177,6 @@ OCR 원문:
 
     @staticmethod
     def _chunk_text(text: str, max_chars: int) -> list[str]:
-        """텍스트를 max_chars 이하의 청크로 분리 (줄 단위로 분리)."""
         if len(text) <= max_chars:
             return [text]
 
@@ -208,26 +211,27 @@ OCR 원문:
     @staticmethod
     def _load_image(path: Path) -> np.ndarray:
         from PIL import Image
-
         image = Image.open(path).convert("RGB")
         return np.array(image)
 
     @staticmethod
     def _parse_ocr_lines(result: Any) -> list[str]:
-        """EasyOCR 결과 파싱: [(bbox, text, confidence), ...] 형식."""
+        """PaddleOCR v3.x predict() 결과 파싱: list[dict] 형식."""
         if not result:
             return []
 
-        parsed_lines: list[str] = []
-        for item in result:
-            if not item or len(item) < 2:
+        lines: list[str] = []
+        for res in result:
+            if not isinstance(res, dict):
                 continue
-            # item[1]이 텍스트, item[2]가 confidence (없을 수도 있음)
-            line_text = str(item[1]).strip()
-            if line_text:
-                parsed_lines.append(line_text)
+            rec_texts = res.get("rec_texts", [])
+            rec_scores = res.get("rec_scores", [])
+            for text, score in zip(rec_texts, rec_scores):
+                text = str(text).strip()
+                if text and score >= 0.5:
+                    lines.append(text)
 
-        return parsed_lines
+        return lines
 
     @staticmethod
     def _split_lines(text: str) -> list[str]:
@@ -241,21 +245,21 @@ OCR 원문:
         return normalized.strip()
 
     @staticmethod
-    def _import_easyocr() -> Any:
+    def _import_paddleocr() -> Any:
         try:
-            import easyocr
+            from paddleocr import PaddleOCR
         except ImportError as exc:
             raise RuntimeError(
-                "easyocr is not installed. Install with `pip install easyocr`."
+                "paddleocr is not installed. Install with `pip install paddleocr`."
             ) from exc
-        return easyocr
+        return PaddleOCR
 
     @staticmethod
-    def _import_pdfium() -> Any:
+    def _import_fitz() -> Any:
         try:
-            import pypdfium2 as pdfium
+            import fitz
         except ImportError as exc:
             raise RuntimeError(
-                "pypdfium2 is required for PDF OCR. Install with `pip install pypdfium2`."
+                "pymupdf is required for PDF processing. Install with `pip install pymupdf`."
             ) from exc
-        return pdfium
+        return fitz
