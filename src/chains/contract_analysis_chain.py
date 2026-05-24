@@ -165,10 +165,32 @@ class ContractAnalysisChain:
 
         page_refs = [page.page_index for page in ocr_result.pages]
         chunks = [c.strip() for c in self._clause_heading_pattern.split(text) if c.strip()]
-        clauses: list[Clause] = []
-        index = 0
-        order = 1
 
+        # 첫 번째 조항 헤딩(제N조 / N.) 위치를 찾아 전문과 본문 분리
+        first_clause_idx = next(
+            (i for i, c in enumerate(chunks) if self._looks_like_clause_heading(c)),
+            None,
+        )
+
+        # 제N조 패턴이 없는 문서 — 전체를 단일 조항으로
+        if first_clause_idx is None:
+            return [Clause(clause_id="clause-001", title=None, text=text, page_refs=page_refs, order=1)]
+
+        clauses: list[Clause] = []
+
+        # 첫 번째 제N조 이전 텍스트(표지, 당사자 정보 등) → 전문으로 보존
+        if first_clause_idx > 0:
+            preamble_text = "\n\n".join(chunks[:first_clause_idx])
+            clauses.append(Clause(
+                clause_id="clause-000",
+                title="전문",
+                text=preamble_text,
+                page_refs=page_refs,
+                order=0,
+            ))
+
+        index = first_clause_idx
+        order = 1
         while index < len(chunks):
             current = chunks[index]
             next_chunk = chunks[index + 1].strip() if index + 1 < len(chunks) else ""
@@ -191,10 +213,7 @@ class ContractAnalysisChain:
             ))
             order += 1
 
-        if clauses:
-            return clauses
-
-        return [Clause(clause_id="clause-001", title=None, text=text, page_refs=page_refs, order=1)]
+        return clauses
 
     # ── LLM: 핵심 정보 추출 ──────────────────────────────────────────────────
 

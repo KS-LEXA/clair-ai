@@ -101,8 +101,28 @@ class TestSplitClauses:
         chain = ContractAnalysisChain.__new__(ContractAnalysisChain)
         ocr = _make_ocr_result(sample_contract_text)
         clauses = chain._split_clauses(ocr)
-        for i, c in enumerate(clauses, start=1):
+        # 전문(clause-000)은 제외하고 실제 조항만 순번 확인
+        actual = [c for c in clauses if c.clause_id != "clause-000"]
+        for i, c in enumerate(actual, start=1):
             assert c.clause_id == f"clause-{i:03d}"
+
+    def test_preamble_extracted_before_first_article(self):
+        chain = ContractAnalysisChain.__new__(ContractAnalysisChain)
+        text = "근로계약서\n주식회사 클레어테크\n\n제1조 (계약 기간)\n내용입니다."
+        ocr = _make_ocr_result(text)
+        clauses = chain._split_clauses(ocr)
+        preamble = next((c for c in clauses if c.clause_id == "clause-000"), None)
+        assert preamble is not None
+        assert preamble.title == "전문"
+        assert "근로계약서" in preamble.text
+        assert any(c.clause_id == "clause-001" for c in clauses)
+
+    def test_no_preamble_when_text_starts_with_article(self):
+        chain = ContractAnalysisChain.__new__(ContractAnalysisChain)
+        text = "제1조 (계약 기간)\n내용입니다.\n제2조 (임금)\n급여 내용."
+        ocr = _make_ocr_result(text)
+        clauses = chain._split_clauses(ocr)
+        assert all(c.clause_id != "clause-000" for c in clauses)
 
     def test_empty_text_returns_empty(self):
         chain = ContractAnalysisChain.__new__(ContractAnalysisChain)
