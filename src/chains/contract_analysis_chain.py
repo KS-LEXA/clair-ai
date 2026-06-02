@@ -86,7 +86,7 @@ class ContractAnalysisChain:
     """OCR → 조항 분리 → LLM 분석(추출/리스크/요약/Q&A) 파이프라인."""
 
     _clause_heading_pattern = re.compile(
-        r"(?=^(제\s*\d+\s*조[^\n]*|[0-9]+\.\s+[^\n]+))",
+        r"(?=^(제\s*\d+\s*조[^\n]*|[0-9]{1,2}\.\s*[가-힣A-Za-z][^\n]*))",
         flags=re.MULTILINE,
     )
 
@@ -285,7 +285,7 @@ class ContractAnalysisChain:
 
         clauses_text = "\n\n".join(
             f"[{c.clause_id}] {c.title or ''}\n{c.text[:500]}"
-            for c in clauses[:20]  # 최대 20개 조항
+            for c in clauses[:40]  # 최대 40개 조항
         )
 
         prompt = f"""계약서를 분석하여 위험 조항만 추출하세요.
@@ -395,7 +395,7 @@ payment, liability, termination, confidentiality, renewal, penalty, ip, dispute,
 
         full_text = "\n\n".join(
             f"{c.title or ''}\n{c.text[:400]}"
-            for c in clauses[:15]
+            for c in clauses[:30]
         )
 
         prompt = f"""다음 계약서를 읽고 핵심 내용을 3-5문장으로 요약해주세요.

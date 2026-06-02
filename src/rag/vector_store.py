@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.chains.contract_analysis_chain import Clause
+
+DB_PATH = Path(__file__).parents[2] / ".contract_db"
 
 
 @dataclass
@@ -18,26 +21,27 @@ class SearchResult:
 
 class ContractVectorStore:
     """
-    계약서 조항을 ChromaDB 인메모리 컬렉션으로 관리.
+    계약서 조항을 ChromaDB PersistentClient 컬렉션으로 관리.
 
     - contract_id 단위로 컬렉션을 분리
-    - 서버 재시작 시 초기화됨 (분석 결과는 clair-backend DB에 영구 저장)
+    - 서버 재시작 후에도 인덱스 유지 (.contract_db/)
     - 멀티스레드 안전: 컬렉션 생성/삭제에 lock 사용
     """
 
-    def __init__(self) -> None:
-        self._client = self._make_client()
+    def __init__(self, db_path: Path = DB_PATH) -> None:
+        self._client = self._make_client(db_path)
         self._lock = threading.Lock()
 
     @staticmethod
-    def _make_client():
+    def _make_client(db_path: Path):
         try:
             import chromadb
         except ImportError as exc:
             raise RuntimeError(
                 "chromadb가 설치되지 않았습니다. `pip install chromadb`"
             ) from exc
-        return chromadb.Client()  # 인메모리
+        db_path.mkdir(parents=True, exist_ok=True)
+        return chromadb.PersistentClient(path=str(db_path))
 
     def _collection_name(self, contract_id: str | int) -> str:
         return f"contract_{contract_id}"
@@ -136,7 +140,7 @@ class ContractVectorStore:
             return False
 
 
-# 모듈 레벨 싱글톤 — 서버 수명과 같음
+# 모듈 레벨 싱글톤
 _store: ContractVectorStore | None = None
 _store_lock = threading.Lock()
 
