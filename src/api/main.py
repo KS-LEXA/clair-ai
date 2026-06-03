@@ -91,7 +91,7 @@ def analyze(req: AnalyzeRequest) -> dict[str, Any]:
         "risks": [asdict(r) for r in result.risks],
         "summary": result.summary,
         "compliance": [asdict(c) for c in result.compliance] if result.compliance else [],
-        "detected_objects": [],         # Vision 파이프라인 연동 시 채울 것
+        "detected_objects": [],
         "ocr_raw_text": result.ocr.raw_text,
         "ocr_pages": [asdict(p) for p in result.ocr.pages],
     }

@@ -9,8 +9,11 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -214,7 +217,7 @@ STATIC_LAW_ARTICLES: list[LawArticle] = [
         law_name="최저임금법",
         article_no="제6조",
         article_title="최저임금의 효력",
-        content="사용자는 최저임금의 적용을 받는 근로자에게 최저임금액 이상의 임금을 지급하여야 한다. 최저임금액보다 낮은 임금을 정한 근로계약은 그 부분에 한하여 이 법으로 정한 최저임금액과 동일한 임금을 지급하기로 한 것으로 본다. (2025년 최저임금: 시간당 10,030원)",
+        content="사용자는 최저임금의 적용을 받는 근로자에게 최저임금액 이상의 임금을 지급하여야 한다. 최저임금액보다 낮은 임금을 정한 근로계약은 그 부분에 한하여 이 법으로 정한 최저임금액과 동일한 임금을 지급하기로 한 것으로 본다. (2026년 최저임금: 시간당 10,320원)",
         contract_types=["근로계약"],
     ),
 
@@ -339,11 +342,14 @@ def fetch_articles(contract_type: str | None = None) -> list[LawArticle]:
         articles: list[LawArticle] = []
         for law in target_laws:
             try:
-                articles.extend(fetch_from_law_api(law))
-            except Exception:
-                pass
+                fetched = fetch_from_law_api(law)
+                logger.info("law.go.kr API 성공: %s → %d개 조문", law, len(fetched))
+                articles.extend(fetched)
+            except Exception as e:
+                logger.warning("law.go.kr API 실패 (%s): %s — 정적 데이터로 폴백", law, e)
         if articles:
             return articles
+        logger.warning("law.go.kr API 전체 실패 — 정적 데이터 사용")
 
     # 폴백: 정적 데이터
     if contract_type:
