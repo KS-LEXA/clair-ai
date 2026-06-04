@@ -36,6 +36,18 @@ class ExtractionResult:
     end_date: FieldValue
     amount_text: FieldValue
     amount_value: FieldValue
+    hourly_wage: FieldValue = None        # 시간급 (원 단위 정수)
+    weekly_work_hours: FieldValue = None  # 주당 실근로시간 (휴게 제외)
+    weekly_work_days: FieldValue = None   # 주당 근무일수
+    monthly_wage: FieldValue = None       # 월급여 (명시값 or 계산값)
+    monthly_wage_is_estimated: bool = False  # True면 계산값, False면 계약서 명시값
+
+    def __post_init__(self):
+        _fv_none = FieldValue(value=None)
+        if self.hourly_wage is None: object.__setattr__(self, 'hourly_wage', _fv_none)
+        if self.weekly_work_hours is None: object.__setattr__(self, 'weekly_work_hours', _fv_none)
+        if self.weekly_work_days is None: object.__setattr__(self, 'weekly_work_days', _fv_none)
+        if self.monthly_wage is None: object.__setattr__(self, 'monthly_wage', _fv_none)
 
 
 @dataclass(slots=True)
@@ -237,7 +249,12 @@ class ContractAnalysisChain:
   "start_date": "계약 시작일 YYYY-MM-DD 형식, 없으면 null",
   "end_date": "계약 종료일 YYYY-MM-DD 형식, 없으면 null",
   "amount_text": "계약 금액 원문 그대로 (예: 금 오천만원(50,000,000원)), 없으면 null",
-  "amount_value": 계약 금액 숫자만 원 단위 정수 (예: 50000000), 없으면 null
+  "amount_value": 계약 금액 숫자만 원 단위 정수 (예: 50000000), 없으면 null,
+  "hourly_wage": 시간급 원 단위 정수 (예: 10500), 없으면 null,
+  "weekly_work_hours": 주당 실근로시간 숫자 — 휴게시간 제외한 실제 근로시간 (예: 주 5일×8시간=40), 없으면 null,
+  "weekly_work_days": 주당 근무일수 정수 (예: 5), 없으면 null,
+  "monthly_wage": 월급여 원 단위 정수. 규칙: ① 계약서에 월급여가 명시된 경우 그 값. ② 명시 안 됐지만 시간급+근무시간이 있으면 계산 — 주휴수당은 주 15시간 이상 시 포함 (주휴수당시간 = 주당실근로시간/40×8). 계산식: round(시간급 × (주당실근로시간 + 주휴수당시간) × 4.345). ③ 계산 불가 시 null,
+  "monthly_wage_is_estimated": 월급여가 계약서 명시값이면 false, 계산한 추정값이면 true. monthly_wage가 null이면 false
 }}
 
 계약서 본문:
@@ -263,6 +280,11 @@ class ContractAnalysisChain:
                 end_date=fv(data.get("end_date")),
                 amount_text=fv(data.get("amount_text")),
                 amount_value=fv(data.get("amount_value")),
+                hourly_wage=fv(data.get("hourly_wage")),
+                weekly_work_hours=fv(data.get("weekly_work_hours")),
+                weekly_work_days=fv(data.get("weekly_work_days")),
+                monthly_wage=fv(data.get("monthly_wage")),
+                monthly_wage_is_estimated=bool(data.get("monthly_wage_is_estimated", False)),
             )
         except Exception:
             return self._extract_fields_fallback(text)
@@ -277,6 +299,19 @@ class ContractAnalysisChain:
         amount_match = amount_pattern.search(text)
         contract_type = self._classify_contract_type(text)
 
+        hourly_wage_match = re.search(r"시간급[^\d]*(\d[\d,]+)", text)
+        hourly_wage_val = self._parse_amount_value(hourly_wage_match.group(1)) if hourly_wage_match else None
+
+        weekly_hours_match = re.search(r"주당\s*(?:실근로|근로)\s*시간[^\d]*(\d+(?:\.\d+)?)", text)
+        weekly_hours_val = float(weekly_hours_match.group(1)) if weekly_hours_match else None
+
+        monthly_wage_val = None
+        is_estimated = False
+        if hourly_wage_val and weekly_hours_val:
+            weekly_holiday = (weekly_hours_val / 40) * 8 if weekly_hours_val >= 15 else 0
+            monthly_wage_val = round(hourly_wage_val * (weekly_hours_val + weekly_holiday) * (365 / 12 / 7))
+            is_estimated = True
+
         return ExtractionResult(
             contract_type=FieldValue(contract_type),
             counterparty_a=FieldValue(None, "추출 실패"),
@@ -286,6 +321,11 @@ class ContractAnalysisChain:
             end_date=FieldValue(dates[2] if len(dates) > 2 else None),
             amount_text=FieldValue(amount_match.group(1) if amount_match else None),
             amount_value=FieldValue(self._parse_amount_value(amount_match.group(1)) if amount_match else None),
+            hourly_wage=FieldValue(hourly_wage_val),
+            weekly_work_hours=FieldValue(weekly_hours_val),
+            weekly_work_days=FieldValue(None),
+            monthly_wage=FieldValue(monthly_wage_val),
+            monthly_wage_is_estimated=is_estimated,
         )
 
     # ── LLM: 리스크 감지 ─────────────────────────────────────────────────────
