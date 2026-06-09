@@ -45,7 +45,8 @@ class OCRPipeline:
     """
 
     # 페이지당 텍스트가 이 글자 수 이상이면 OCR 스킵
-    _TEXT_LAYER_MIN_CHARS = 50
+    # 5 이하로 설정: "6 / 7" 같은 페이지 번호만 있는 페이지는 OCR 불필요
+    _TEXT_LAYER_MIN_CHARS = 5
 
     def __init__(
         self,
@@ -120,10 +121,13 @@ class OCRPipeline:
         return pages
 
     def _extract_page(self, image: np.ndarray, *, page_index: int) -> OCRPageResult:
-        engine = self._get_ocr_engine()
-        result = engine.predict(image)
-        lines = self._parse_ocr_lines(result)
-        text = "\n".join(lines).strip()
+        try:
+            engine = self._get_ocr_engine()
+            result = engine.predict(image)
+            lines = self._parse_ocr_lines(result)
+            text = "\n".join(lines).strip()
+        except Exception:
+            text, lines = "", []
         return OCRPageResult(page_index=page_index, text=text, lines=lines)
 
     def _get_ocr_engine(self) -> Any:
