@@ -99,7 +99,7 @@ class RAGChain:
     def _generate_answer(self, question: str, clauses: list[Clause]) -> QAResult:
         from langchain_core.messages import HumanMessage
         from src.chains.contract_analysis_chain import QAResult
-        from src.llm.gemini import get_llm
+        from src.llm.gemini import get_llm, log_usage
 
         llm = get_llm()
         clauses_text = "\n\n".join(
@@ -121,6 +121,7 @@ class RAGChain:
 질문: {question}"""
 
         response = llm.invoke([HumanMessage(content=prompt)])
+        log_usage("qa", response)
         raw = response.content.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)

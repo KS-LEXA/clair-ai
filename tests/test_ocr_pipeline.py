@@ -270,3 +270,41 @@ class TestExtractPdf:
 
         assert long_text.strip() in result.raw_text
         mock_engine.predict.assert_not_called()
+
+    def test_pdf_skips_llm_correction_when_text_layer_only(self, tmp_path):
+        """모든 페이지를 텍스트 레이어로 읽었으면 Gemini 보정을 호출하지 않아야 한다."""
+        pdf_path = self._make_fake_pdf(tmp_path)
+        long_text = "이것은 텍스트 레이어가 있는 페이지입니다. " * 5
+        mock_fitz, mock_engine = self._make_pdf_mocks(
+            num_pages=2,
+            ocr_lines=[],
+            native_text=long_text,
+        )
+
+        pipeline = OCRPipeline(correct_with_llm=True)
+        with patch.object(pipeline, "_import_fitz", return_value=mock_fitz), \
+             patch.object(pipeline, "_get_ocr_engine", return_value=mock_engine), \
+             patch.object(pipeline, "_correct_with_gemini") as mock_correct:
+            result = pipeline.extract(pdf_path)
+
+        mock_correct.assert_not_called()
+        assert "이것은 텍스트 레이어가 있는 페이지입니다." in result.normalized_text
+
+    def test_pdf_corrects_when_any_page_needed_ocr(self, tmp_path):
+        """한 페이지라도 OCR을 거쳤으면 보정을 수행해야 한다."""
+        pdf_path = self._make_fake_pdf(tmp_path)
+        mock_fitz, mock_engine = self._make_pdf_mocks(
+            num_pages=1,
+            ocr_lines=[{"rec_texts": ["계약서 본문"], "rec_scores": [0.95]}],
+        )
+
+        pipeline = OCRPipeline(correct_with_llm=True)
+        with patch.object(pipeline, "_import_fitz", return_value=mock_fitz), \
+             patch.object(pipeline, "_get_ocr_engine", return_value=mock_engine), \
+             patch.object(
+                 pipeline, "_correct_with_gemini", return_value="보정된 본문"
+             ) as mock_correct:
+            result = pipeline.extract(pdf_path)
+
+        mock_correct.assert_called_once()
+        assert "보정된 본문" in result.normalized_text
