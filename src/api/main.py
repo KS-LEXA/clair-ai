@@ -5,6 +5,7 @@ clair-backend가 localhost HTTP로 호출하는 내부 AI 서비스.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,13 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parents[2] / ".env")
+
+# 설정이 없으면 루트 로거가 WARNING이라 src.* 의 logger.info가 전부 묻힌다.
+# 단계별 Gemini 토큰 사용량([gemini usage] 로그)을 보려면 INFO가 필요하다.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
