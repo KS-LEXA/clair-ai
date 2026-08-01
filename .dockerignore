@@ -1,0 +1,16 @@
+.git
+.github
+tests
+datasets
+venv
+__pycache__
+**/__pycache__
+*.pyc
+._*
+.DS_Store
+.env
+.usage_db
+.law_db
+.contract_db
+.paddlex
+*.egg-info

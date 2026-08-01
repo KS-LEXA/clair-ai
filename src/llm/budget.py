@@ -23,7 +23,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parents[2] / ".usage_db" / "usage.sqlite3"
+# 배포 시 볼륨 마운트 경로를 가리킬 수 있도록 환경변수로 재정의 가능하게 둔다.
+# 카운터가 사라지면 예산 상한이 무력화되므로 영속 스토리지가 필수다.
+_DATA_DIR = Path(os.environ.get("CLAIR_AI_DATA_DIR", Path(__file__).parents[2]))
+DB_PATH = _DATA_DIR / ".usage_db" / "usage.sqlite3"
 
 # gemini-2.5-flash 단가 (USD / 1M 토큰). thinking 토큰은 출력으로 과금된다.
 # https://ai.google.dev/gemini-api/docs/pricing
