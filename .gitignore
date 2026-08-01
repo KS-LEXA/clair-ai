@@ -9,3 +9,14 @@ __pycache__/
 uploads/
 *.pdiparams
 *.pdmodel
+
+# macOS 리소스 포크 메타데이터 (non-APFS 볼륨에서 생성됨)
+._*
+.DS_Store
+
+# API 사용량/예산 카운터 (런타임 데이터)
+.usage_db/
+
+# ChromaDB 영속 데이터 (런타임 생성)
+.law_db/
+.contract_db/
