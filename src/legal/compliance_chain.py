@@ -102,7 +102,7 @@ class ComplianceChain:
     ) -> list[ComplianceResult]:
         """관련 법령이 있는 조항 전체를 LLM 1회 호출로 배치 판단."""
         from langchain_core.messages import HumanMessage
-        from src.llm.gemini import get_llm
+        from src.llm.gemini import get_llm, log_usage
 
         llm = get_llm()
 
@@ -142,6 +142,7 @@ class ComplianceChain:
 {items_text}"""
 
         response = llm.invoke([HumanMessage(content=prompt)])
+        log_usage("compliance", response)
         raw = response.content.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)

@@ -13,7 +13,7 @@ class RAGChain:
     RAG 기반 Q&A 체인.
 
     흐름:
-      1. vector_store에서 질문과 유사한 조항 top-k 검색
+      1. vector_store에서 하이브리드(Dense+BM25, RRF 병합) 검색으로 관련 조항 top-k 검색
       2. 검색된 조항만 LLM 프롬프트에 포함 (전체 조항 X)
       3. LLM이 답변 + 근거 clause_id 반환
 
@@ -65,7 +65,7 @@ class RAGChain:
                 from src.rag.vector_store import get_vector_store
                 store = get_vector_store()
                 if store.has_index(contract_id):
-                    results = store.search(contract_id, question, top_k=self.top_k)
+                    results = store.hybrid_search(contract_id, question, top_k=self.top_k)
                     clause_map = {c.clause_id: c for c in clauses}
                     retrieved = [
                         clause_map[r.clause_id]
@@ -99,7 +99,7 @@ class RAGChain:
     def _generate_answer(self, question: str, clauses: list[Clause]) -> QAResult:
         from langchain_core.messages import HumanMessage
         from src.chains.contract_analysis_chain import QAResult
-        from src.llm.gemini import get_llm
+        from src.llm.gemini import get_llm, log_usage
 
         llm = get_llm()
         clauses_text = "\n\n".join(
@@ -121,6 +121,7 @@ class RAGChain:
 질문: {question}"""
 
         response = llm.invoke([HumanMessage(content=prompt)])
+        log_usage("qa", response)
         raw = response.content.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)

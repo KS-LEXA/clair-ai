@@ -231,7 +231,7 @@ class ContractAnalysisChain:
 
     def _extract_fields(self, text: str) -> ExtractionResult:
         try:
-            from src.llm.gemini import get_llm
+            from src.llm.gemini import get_llm, log_usage
             llm = get_llm()
             print("   ↳ Gemini 핵심 정보 추출 호출")
         except Exception as e:
@@ -262,6 +262,7 @@ class ContractAnalysisChain:
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
+            log_usage("extract_fields", response)
             raw = response.content.strip()
             # 코드블록 제거
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -335,7 +336,7 @@ class ContractAnalysisChain:
             return []
 
         try:
-            from src.llm.gemini import get_llm
+            from src.llm.gemini import get_llm, log_usage
             llm = get_llm()
             print("   ↳ Gemini 리스크 분석 호출")
         except Exception as e:
@@ -385,6 +386,7 @@ payment, liability, termination, confidentiality, renewal, penalty, ip, dispute,
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
+            log_usage("detect_risks", response)
             raw = response.content.strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
@@ -445,7 +447,7 @@ payment, liability, termination, confidentiality, renewal, penalty, ip, dispute,
             return "추출된 계약 본문이 없어 요약을 생성할 수 없습니다."
 
         try:
-            from src.llm.gemini import get_llm
+            from src.llm.gemini import get_llm, log_usage
             llm = get_llm()
             print("   ↳ Gemini 요약 호출")
         except Exception as e:
@@ -467,6 +469,7 @@ payment, liability, termination, confidentiality, renewal, penalty, ip, dispute,
 
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
+            log_usage("summarize", response)
             return response.content.strip()
         except Exception:
             return self._summarize_fallback(clauses, extraction)

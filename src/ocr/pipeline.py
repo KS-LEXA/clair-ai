@@ -78,13 +78,18 @@ class OCRPipeline:
             )
 
         if source_type == "pdf":
-            pages = self._extract_from_pdf(path)
+            pages, used_ocr = self._extract_from_pdf(path)
         else:
             pages = [self._extract_page(self._load_image(path), page_index=0)]
+            used_ocr = True
 
         raw_text = "\n\n".join(page.text for page in pages).strip()
 
-        corrected_text = self._correct_with_gemini(raw_text) if self.correct_with_llm else raw_text
+        # 모든 페이지를 텍스트 레이어에서 그대로 읽었다면 OCR 오탈자가 없으므로
+        # 보정 호출을 건너뛴다. 보정은 문서 전체를 넣고 전체를 되받아 입력·출력
+        # 토큰을 모두 쓰는 가장 비싼 단계다.
+        needs_correction = self.correct_with_llm and used_ocr
+        corrected_text = self._correct_with_gemini(raw_text) if needs_correction else raw_text
 
         return OCRDocumentResult(
             document_id=resolved_document_id,
@@ -94,11 +99,13 @@ class OCRPipeline:
             pages=pages,
         )
 
-    def _extract_from_pdf(self, path: Path) -> list[OCRPageResult]:
+    def _extract_from_pdf(self, path: Path) -> tuple[list[OCRPageResult], bool]:
+        """페이지 목록과 함께, 한 페이지라도 OCR을 거쳤는지 여부를 반환한다."""
         fitz = self._import_fitz()
         doc = fitz.open(str(path))
         scale = self.dpi / 72
         pages: list[OCRPageResult] = []
+        used_ocr = False
 
         for page_index in range(len(doc)):
             pdf_page = doc[page_index]
@@ -116,9 +123,10 @@ class OCRPipeline:
             if pix.n == 4:
                 img = img[:, :, :3]
             pages.append(self._extract_page(img, page_index=page_index))
+            used_ocr = True
 
         doc.close()
-        return pages
+        return pages, used_ocr
 
     def _extract_page(self, image: np.ndarray, *, page_index: int) -> OCRPageResult:
         try:
@@ -150,8 +158,9 @@ class OCRPipeline:
 
         try:
             from langchain_core.messages import HumanMessage
-            from src.llm.gemini import get_llm
-            llm = get_llm()
+            from src.llm.gemini import get_llm, log_usage
+            # 오탈자 교정은 추론이 필요 없는 텍스트 정규화라 thinking을 끈다.
+            llm = get_llm(thinking_budget=0)
         except Exception:
             return raw_text
 
@@ -173,6 +182,7 @@ OCR 원문:
 
             try:
                 response = llm.invoke([HumanMessage(content=prompt)])
+                log_usage("ocr_correction", response)
                 corrected_chunks.append(response.content.strip())
             except Exception:
                 corrected_chunks.append(chunk)
