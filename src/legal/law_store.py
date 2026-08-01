@@ -7,12 +7,14 @@
 """
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from dataclasses import dataclass
 from pathlib import Path
 
-DB_PATH = Path(__file__).parents[2] / ".law_db"
+# 배포 시 볼륨 마운트 경로를 가리킬 수 있도록 환경변수로 재정의 가능.
+DB_PATH = Path(os.environ.get("CLAIR_AI_DATA_DIR", Path(__file__).parents[2])) / ".law_db"
 
 
 @dataclass
