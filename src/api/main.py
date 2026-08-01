@@ -80,8 +80,25 @@ def health():
     return {"status": "ok", "service": "clair-ai"}
 
 
+@app.get("/usage", tags=["시스템"])
+def usage() -> dict[str, Any]:
+    """이번 달 Gemini API 사용량과 예산 소진 현황."""
+    from src.llm.budget import snapshot
+    return snapshot()
+
+
+def _guard_budget() -> None:
+    """월 예산을 초과했으면 429로 거절한다. 비싼 LLM 작업 시작 전에 호출한다."""
+    from src.llm.budget import BudgetExceeded, ensure_within_budget
+    try:
+        ensure_within_budget()
+    except BudgetExceeded as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
+
+
 @app.post("/analyze", tags=["분석"])
 def analyze(req: AnalyzeRequest) -> dict[str, Any]:
+    _guard_budget()
     path = Path(req.file_path)
     if not path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"파일을 찾을 수 없습니다: {req.file_path}")
@@ -118,6 +135,7 @@ def compliance(req: ComplianceRequest) -> dict[str, Any]:
     - Gemini API 키 없으면 "검토불가" 반환
     - 서버 시작 시 법령 DB가 자동 초기화됨
     """
+    _guard_budget()
     from dataclasses import asdict as _asdict
     from src.legal.compliance_chain import get_compliance_chain
 
@@ -166,6 +184,7 @@ def qa(req: QARequest) -> dict[str, Any]:
     - use_rag=True (기본): 벡터 검색으로 관련 조항만 찾아 LLM 전달
     - use_rag=False: 전체 조항을 LLM에 직접 전달 (조항 수가 적을 때 유용)
     """
+    _guard_budget()
     clauses = [
         Clause(
             clause_id=c["clause_id"],

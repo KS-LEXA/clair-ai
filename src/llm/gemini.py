@@ -49,11 +49,18 @@ def log_usage(label: str, response: Any) -> None:
     if not usage:
         return
     thinking = (usage.get("output_token_details") or {}).get("reasoning", 0)
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
     logger.info(
         "[gemini usage] %s: input=%s output=%s (thinking=%s) total=%s",
         label,
-        usage.get("input_tokens", 0),
-        usage.get("output_tokens", 0),
+        input_tokens,
+        output_tokens,
         thinking,
         usage.get("total_tokens", 0),
     )
+
+    # 모든 LLM 호출이 이 함수를 지나므로, 여기서 집계하면 단계가 추가되어도 누락되지 않는다.
+    from src.llm.budget import record
+
+    record(input_tokens, output_tokens)
